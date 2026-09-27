@@ -276,11 +276,18 @@ def add_media(
     return {**document, "_id": media_id}
 
 
-def delete_media(db: GitDb, media_id: str) -> Dict[str, Any]:
+def delete_media(settings: Settings, db: GitDb, media_id: str) -> Dict[str, Any]:
     item = get_media(db, media_id)
     with WRITE_LOCK:
         db.collection(MEDIA).delete(item["_id"], message=f"pixel: remove {item.get('filename', '')}")
-        files = [path for path in (item.get("path"), item.get("thumb")) if isinstance(path, str)]
+        files = [
+            path
+            for path in (
+                safe_media_path(settings, item.get("path")),
+                safe_media_path(settings, item.get("thumb")),
+            )
+            if path is not None
+        ]
         if files:
             commit_files(db, {}, files, message=f"pixel: delete files of {item['_id']}")
         album_id = item.get("album")

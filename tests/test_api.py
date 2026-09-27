@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from pixel import store
 from pixel.app import GitDbError, create_app
 from pixel.config import Settings
+from pixel.github import repository_access
 from tests.conftest import (
     AUDIT_REPO,
     DATA_REPO,
@@ -89,6 +90,39 @@ def test_session_cookie_is_http_only_and_token_is_never_returned(client: TestCli
     assert OWNER not in client.get("/api/session").text
 
 
+def test_trusted_forwarded_https_sets_a_secure_session_cookie(settings: Settings) -> None:
+    with make_client(replace(settings, trust_proxy=True)) as client:
+        response = client.post("/api/login", json={"token": OWNER}, headers={"X-Forwarded-Proto": "https"})
+    assert "Secure" in response.headers["set-cookie"]
+
+
+def test_anonymous_permissions_use_the_configured_ttl(
+    github: tuple[FakeGitHub, str], settings: Settings
+) -> None:
+    state, _ = github
+    state.repos[DATA_REPO].private = False
+    with make_client(replace(settings, permission_ttl_seconds=0)) as client:
+        assert client.get("/api/session").json()["access"]["can_view"] is True
+        state.repos[DATA_REPO].private = True
+        assert client.get("/api/session").json()["access"]["can_view"] is False
+
+
+def test_authenticated_access_requires_pull_permission() -> None:
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict:
+            return {"private": True, "permissions": {"admin": False, "push": False, "pull": False}}
+
+    class Client:
+        @staticmethod
+        def request(*_args: object, **_kwargs: object) -> Response:
+            return Response()
+
+    assert repository_access(Client(), DATA_REPO).can_view is False
+
+
 def test_revoked_access_takes_effect(github: tuple[FakeGitHub, str], fast_permissions: Settings) -> None:
     state, _ = github
     with make_client(fast_permissions) as owner:
@@ -158,12 +192,15 @@ def test_upload_commits_photo_thumbnail_and_gitdb_documents(
     thumb_response = client.get(f"/api/media/{item['id']}/thumb")
     assert thumb_response.content == thumb
     assert thumb_response.headers["content-type"] == "image/jpeg"
+    assert thumb_response.headers["cache-control"] == "no-store"
     original = client.get(f"/api/media/{item['id']}/original")
     assert original.content == photo
     assert original.headers["content-disposition"].startswith("inline")
+    assert original.headers["cache-control"] == "no-store"
     download = client.get(f"/api/media/{item['id']}/download")
     assert download.content == photo
     assert download.headers["content-disposition"].startswith("attachment")
+    assert download.headers["cache-control"] == "no-store"
     assert "Beach%20day.jpg" in download.headers["content-disposition"]
 
 
@@ -236,6 +273,29 @@ def test_media_paths_outside_the_media_root_are_never_served(settings: Settings)
     assert store.safe_media_path(settings, None) is None
 
 
+def test_delete_media_validates_document_paths(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    deleted: list[str] = []
+
+    class Collection:
+        @staticmethod
+        def delete(*_args: object, **_kwargs: object) -> None:
+            pass
+
+    class Db:
+        @staticmethod
+        def collection(*_args: object) -> Collection:
+            return Collection()
+
+    monkeypatch.setattr(
+        store,
+        "get_media",
+        lambda *_args: {"_id": "media", "path": "data/albums/secret.json", "thumb": "media/a/thumb.jpg"},
+    )
+    monkeypatch.setattr(store, "commit_files", lambda _db, _puts, paths, **_kwargs: deleted.extend(paths))
+    store.delete_media(settings, Db(), "media")
+    assert deleted == ["media/a/thumb.jpg"]
+
+
 def test_sniffing() -> None:
     assert store.sniff(jpeg()) == "image/jpeg"
     assert store.sniff(b"\x89PNG\r\n\x1a\n....") == "image/png"
@@ -285,6 +345,14 @@ def test_audit_is_optional(settings: Settings) -> None:
         assert client.get("/api/session").json()["audit_enabled"] is False
         sign_in(client, OWNER)
         assert client.get("/api/audit").json() == {"enabled": False, "events": []}
+
+
+def test_public_audit_repository_prevents_startup(github: tuple[FakeGitHub, str], settings: Settings) -> None:
+    state, _ = github
+    state.repos[AUDIT_REPO].private = False
+    with pytest.raises(RuntimeError, match="must be a private repository"):
+        with make_client(settings):
+            pass
 
 
 def test_a_video_view_is_audited_once_despite_range_probes(client: TestClient) -> None:

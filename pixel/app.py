@@ -35,8 +35,6 @@ from .github import Access, current_user, open_raw, repository_access
 from .sessions import COOKIE, Session, SessionStore
 
 STATIC = Path(__file__).with_name("static")
-# Unauthenticated GitHub API calls are limited to 60 per hour per IP address.
-ANONYMOUS_ACCESS_TTL = 600.0
 CSRF_HEADER = "x-pixel"
 
 CSP = "; ".join(
@@ -118,7 +116,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     def anonymous_access() -> Access:
         with anonymous_lock:
             cached = anonymous_state["access"]
-            if cached is not None and time.monotonic() - anonymous_state["checked"] < ANONYMOUS_ACCESS_TTL:
+            if (
+                cached is not None
+                and time.monotonic() - anonymous_state["checked"] < settings.permission_ttl_seconds
+            ):
                 return cached
         try:
             access = repository_access(anonymous_client, settings.repo)
@@ -202,7 +203,6 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         else:
             mime = item.get("mime") if item.get("mime") in store.MEDIA_TYPES else "application/octet-stream"
         headers = dict(raw.headers)
-        headers["Cache-Control"] = "private, max-age=300"
         filename = str(item.get("filename") or "download")
         headers["Content-Disposition"] = disposition(
             "attachment" if mode == "download" else "inline", filename
@@ -291,9 +291,15 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             session.sid,
             httponly=True,
             samesite="strict",
-            secure=settings.cookie_secure
-            if settings.cookie_secure is not None
-            else request.url.scheme == "https",
+            secure=(
+                settings.cookie_secure
+                if settings.cookie_secure is not None
+                else (
+                    request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower() == "https"
+                    if settings.trust_proxy
+                    else request.url.scheme == "https"
+                )
+            ),
             max_age=settings.session_max_seconds,
             path="/",
         )
@@ -368,7 +374,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     @app.delete("/api/media/{media_id}", dependencies=[Depends(csrf)])
     def remove_media(request: Request, media_id: str) -> Dict[str, bool]:
         who = require_write(request, viewer(request))
-        item = store.delete_media(who.db, media_id)
+        item = store.delete_media(settings, who.db, media_id)
         record(request, who, "delete_media", album=item.get("album"), media=media_id)
         return {"ok": True}
 

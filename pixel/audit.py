@@ -59,7 +59,7 @@ class AuditLog:
     def start(self) -> None:
         if not self.enabled or self._thread is not None:
             return
-        self._warn_if_public()
+        self._require_private()
         self._thread = threading.Thread(target=self._run, name="pixel-audit", daemon=True)
         self._thread.start()
 
@@ -74,18 +74,14 @@ class AuditLog:
         while not self._stop.wait(self.settings.audit_flush_seconds):
             self.flush()
 
-    def _warn_if_public(self) -> None:
+    def _require_private(self) -> None:
         assert self.db is not None
         try:
             access = repository_access(GitHubClient(None, api_url=self.settings.api_url), self.repo)
         except GitDbError:
             return
         if access.can_view:
-            log.warning(
-                "audit repository %s is PUBLIC: visitor addresses will be world readable; "
-                "set PIXEL_AUDIT_REPO to a private repository",
-                self.repo,
-            )
+            raise RuntimeError(f"PIXEL_AUDIT_REPO {self.repo} must be a private repository")
 
     # --------------------------------------------------------------- events
     def record(self, event: str, **fields: Any) -> None:
