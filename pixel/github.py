@@ -68,7 +68,7 @@ def repository_access(client: GitHubClient, repo: str) -> Access:
         return Access(can_view=True, can_write=False, is_admin=False, private=private)
     admin = bool(permissions.get("admin"))
     push = admin or bool(permissions.get("maintain")) or bool(permissions.get("push"))
-    can_view = not private or bool(permissions.get("pull"))
+    can_view = not private or push or bool(permissions.get("pull"))
     return Access(can_view=can_view, can_write=can_view and push, is_admin=admin, private=private)
 
 

@@ -280,7 +280,7 @@ def add_media(
 
 def delete_media(settings: Settings, db: GitDb, media_id: str) -> Dict[str, Any]:
     item = get_media(db, media_id)
-    files = []
+    files: List[str] = []
     for field in ("path", "thumb"):
         value = item.get(field)
         if value is None:

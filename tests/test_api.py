@@ -124,7 +124,7 @@ def test_authenticated_access_requires_pull_permission() -> None:
 
         @staticmethod
         def json() -> dict:
-            return {"private": True, "permissions": {"admin": False, "push": True, "pull": False}}
+            return {"private": True, "permissions": {"admin": False, "push": False, "pull": False}}
 
     class Client:
         @staticmethod
@@ -134,6 +134,24 @@ def test_authenticated_access_requires_pull_permission() -> None:
     access = repository_access(Client(), DATA_REPO)
     assert access.can_view is False
     assert access.can_write is False
+
+
+def test_authenticated_write_permission_implies_view_permission() -> None:
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict:
+            return {"private": True, "permissions": {"admin": False, "push": True, "pull": False}}
+
+    class Client:
+        @staticmethod
+        def request(*_args: object, **_kwargs: object) -> Response:
+            return Response()
+
+    access = repository_access(Client(), DATA_REPO)
+    assert access.can_view is True
+    assert access.can_write is True
 
 
 def test_revoked_access_takes_effect(github: tuple[FakeGitHub, str], fast_permissions: Settings) -> None:
