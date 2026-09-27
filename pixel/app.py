@@ -116,6 +116,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     def anonymous_access() -> Access:
         with anonymous_lock:
             cached = anonymous_state["access"]
+            # Anonymous GitHub API requests are limited to 60 per hour, but this
+            # cache must not outlast the configured permission re-check interval.
             if (
                 cached is not None
                 and time.monotonic() - anonymous_state["checked"] < settings.permission_ttl_seconds
@@ -203,6 +205,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         else:
             mime = item.get("mime") if item.get("mime") in store.MEDIA_TYPES else "application/octet-stream"
         headers = dict(raw.headers)
+        headers["Cache-Control"] = "no-store"
         filename = str(item.get("filename") or "download")
         headers["Content-Disposition"] = disposition(
             "attachment" if mode == "download" else "inline", filename

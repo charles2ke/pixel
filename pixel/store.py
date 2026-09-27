@@ -280,15 +280,18 @@ def add_media(
 
 def delete_media(settings: Settings, db: GitDb, media_id: str) -> Dict[str, Any]:
     item = get_media(db, media_id)
+    files = []
+    for field in ("path", "thumb"):
+        value = item.get(field)
+        if value is None:
+            continue
+        path = safe_media_path(settings, value)
+        if path is None:
+            log.warning("Refusing to delete invalid media %s path for %s", field, item["_id"])
+            raise StoreError("stored media path is invalid", 409)
+        files.append(path)
     with WRITE_LOCK:
         db.collection(MEDIA).delete(item["_id"], message=f"pixel: remove {item.get('filename', '')}")
-        files = []
-        for field in ("path", "thumb"):
-            path = safe_media_path(settings, item.get(field))
-            if path is not None:
-                files.append(path)
-            elif item.get(field) is not None:
-                log.warning("Skipping invalid media %s path for %s", field, item["_id"])
         if files:
             commit_files(db, {}, files, message=f"pixel: delete files of {item['_id']}")
         album_id = item.get("album")

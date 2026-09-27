@@ -80,7 +80,7 @@ class AuditLog:
             access = repository_access(GitHubClient(None, api_url=self.settings.api_url), self.repo)
         except GitDbError:
             return
-        if access.can_view:
+        if not access.private:
             raise RuntimeError(f"PIXEL_AUDIT_REPO {self.repo} must be a private repository")
 
     # --------------------------------------------------------------- events
