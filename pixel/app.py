@@ -145,7 +145,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     # The token was revoked or expired on GitHub.
                     sessions.drop(sid)
                     session = None
-                except GitDbError:
+                except GitDbError as exc:
+                    log.warning(
+                        "Repository permission refresh failed (%s); denying request", type(exc).__name__
+                    )
+                    # Fail closed for this request while retaining the session for a later retry.
                     return Viewer(session, Access.none(), session.db)
         if session is not None:
             return Viewer(session, session.access, session.db)
