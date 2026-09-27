@@ -75,7 +75,6 @@ class AuditLog:
             self.flush()
 
     def _require_private(self) -> None:
-        assert self.db is not None
         try:
             access = repository_access(GitHubClient(None, api_url=self.settings.api_url), self.repo)
         except GitDbError as exc:
