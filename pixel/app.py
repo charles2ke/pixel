@@ -146,7 +146,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     sessions.drop(sid)
                     session = None
                 except GitDbError:
-                    session.access = Access.none()
+                    return Viewer(session, Access.none(), session.db)
         if session is not None:
             return Viewer(session, session.access, session.db)
         return Viewer(None, anonymous_access(), anonymous_db)

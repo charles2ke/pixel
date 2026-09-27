@@ -5,10 +5,9 @@ from dataclasses import replace
 
 import pytest
 from fastapi.testclient import TestClient
-from gitdb import GitDbError
 
 from pixel import store
-from pixel.app import create_app
+from pixel.app import GitDbError, create_app
 from pixel.config import Settings
 from tests.conftest import (
     AUDIT_REPO,
