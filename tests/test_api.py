@@ -5,6 +5,7 @@ from dataclasses import replace
 
 import pytest
 from fastapi.testclient import TestClient
+from gitdb import GitDbError
 
 from pixel import store
 from pixel.app import create_app
@@ -101,6 +102,19 @@ def test_revoked_access_takes_effect(github: tuple[FakeGitHub, str], fast_permis
         del state.repos[DATA_REPO].roles["friend"]
         assert friend.get(f"/api/albums/{album}").status_code == 403
         assert friend.get(f"/api/media/{media}/download").status_code == 403
+
+
+def test_permission_refresh_error_fails_closed(
+    fast_permissions: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with make_client(fast_permissions) as client:
+        sign_in(client, FRIEND)
+
+        def unavailable(*_args: object) -> None:
+            raise GitDbError("GitHub temporarily unavailable")
+
+        monkeypatch.setattr("pixel.app.repository_access", unavailable)
+        assert client.get("/api/albums").status_code == 403
 
 
 def test_mutations_require_the_csrf_header(settings: Settings) -> None:
