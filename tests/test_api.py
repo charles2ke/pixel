@@ -113,8 +113,11 @@ def test_permission_refresh_error_fails_closed(
         def unavailable(*_args: object) -> None:
             raise GitDbError("GitHub temporarily unavailable")
 
-        monkeypatch.setattr("pixel.app.repository_access", unavailable)
-        assert client.get("/api/albums").status_code == 403
+        with monkeypatch.context() as patch:
+            patch.setattr("pixel.app.repository_access", unavailable)
+            assert client.get("/api/albums").status_code == 403
+
+        assert client.get("/api/albums").status_code == 200
 
 
 def test_mutations_require_the_csrf_header(settings: Settings) -> None:
