@@ -78,8 +78,8 @@ class AuditLog:
         assert self.db is not None
         try:
             access = repository_access(GitHubClient(None, api_url=self.settings.api_url), self.repo)
-        except GitDbError:
-            return
+        except GitDbError as exc:
+            raise RuntimeError(f"could not verify audit repository {self.repo} is private") from exc
         if not access.private:
             raise RuntimeError(f"PIXEL_AUDIT_REPO {self.repo} must be a private repository")
 

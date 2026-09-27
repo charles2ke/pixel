@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from pixel import store
 from pixel.app import GitDbError, create_app
+from pixel.audit import AuditLog
 from pixel.config import Settings
 from pixel.github import repository_access
 from tests.conftest import (
@@ -123,14 +124,16 @@ def test_authenticated_access_requires_pull_permission() -> None:
 
         @staticmethod
         def json() -> dict:
-            return {"private": True, "permissions": {"admin": False, "push": False, "pull": False}}
+            return {"private": True, "permissions": {"admin": False, "push": True, "pull": False}}
 
     class Client:
         @staticmethod
         def request(*_args: object, **_kwargs: object) -> Response:
             return Response()
 
-    assert repository_access(Client(), DATA_REPO).can_view is False
+    access = repository_access(Client(), DATA_REPO)
+    assert access.can_view is False
+    assert access.can_write is False
 
 
 def test_revoked_access_takes_effect(github: tuple[FakeGitHub, str], fast_permissions: Settings) -> None:
@@ -364,6 +367,17 @@ def test_public_audit_repository_prevents_startup(github: tuple[FakeGitHub, str]
     with pytest.raises(RuntimeError, match="must be a private repository"):
         with make_client(settings):
             pass
+
+
+def test_unverified_audit_repository_prevents_startup(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unavailable(*_args: object) -> None:
+        raise GitDbError("GitHub temporarily unavailable")
+
+    monkeypatch.setattr("pixel.audit.repository_access", unavailable)
+    with pytest.raises(RuntimeError, match="could not verify audit repository"):
+        AuditLog(settings).start()
 
 
 def test_a_video_view_is_audited_once_despite_range_probes(client: TestClient) -> None:
