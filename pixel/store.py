@@ -288,7 +288,10 @@ def delete_media(settings: Settings, db: GitDb, media_id: str) -> Dict[str, Any]
         path = safe_media_path(settings, value)
         if path is None:
             log.warning("Refusing to delete invalid media %s for %s", field, item["_id"])
-            raise StoreError(f"stored media {field} is outside the media directory; delete was aborted", 500)
+            raise StoreError(
+                f"stored media {field} is not a valid path inside the media directory; delete was aborted",
+                500,
+            )
         files.append(path)
     with WRITE_LOCK:
         db.collection(MEDIA).delete(item["_id"], message=f"pixel: remove {item.get('filename', '')}")
