@@ -323,7 +323,7 @@ def test_delete_media_validates_document_paths(settings: Settings, monkeypatch: 
         lambda *_args: {"_id": "media", "path": "data/albums/secret.json", "thumb": "media/a/thumb.jpg"},
     )
     monkeypatch.setattr(store, "commit_files", lambda _db, _puts, paths, **_kwargs: deleted.extend(paths))
-    with pytest.raises(store.StoreError, match="stored media path is invalid"):
+    with pytest.raises(store.StoreError, match="stored media path is outside the media directory"):
         store.delete_media(settings, Db(), "media")
     assert deleted == []
 

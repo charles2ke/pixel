@@ -79,6 +79,8 @@ class AuditLog:
         try:
             access = repository_access(GitHubClient(None, api_url=self.settings.api_url), self.repo)
         except GitDbError as exc:
+            # Audit events contain visitor metadata, so startup requires GitHub
+            # availability to confirm the audit repository is private.
             raise RuntimeError(
                 f"could not verify audit repository {self.repo} is private; "
                 "check PIXEL_API_URL and network access"
