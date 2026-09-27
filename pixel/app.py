@@ -286,6 +286,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             record(request, None, "sign_in_denied", attempted_login=user["login"])
             raise HTTPException(403, f"@{user['login']} has no access to {settings.repo}.")
         session = sessions.create(token, user["login"], user.get("avatar_url"), db, access)
+        forwarded_proto = (
+            request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower()
+            if settings.trust_proxy
+            else ""
+        )
         response.set_cookie(
             COOKIE,
             session.sid,
@@ -294,11 +299,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             secure=(
                 settings.cookie_secure
                 if settings.cookie_secure is not None
-                else (
-                    request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower() == "https"
-                    if settings.trust_proxy
-                    else request.url.scheme == "https"
-                )
+                else forwarded_proto == "https" or (not forwarded_proto and request.url.scheme == "https")
             ),
             max_age=settings.session_max_seconds,
             path="/",

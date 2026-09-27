@@ -12,6 +12,7 @@ Layout inside the data repository::
 
 from __future__ import annotations
 
+import logging
 import re
 import threading
 from typing import Any, Dict, List, Optional, Tuple
@@ -23,6 +24,7 @@ from .github import commit_files
 
 ALBUMS = "albums"
 MEDIA = "media"
+log = logging.getLogger("pixel.store")
 
 #: Sniffed media type -> (kind, file extension). Anything else is rejected, so
 #: nothing that a browser could execute (HTML, SVG, ...) is ever stored.
@@ -280,14 +282,13 @@ def delete_media(settings: Settings, db: GitDb, media_id: str) -> Dict[str, Any]
     item = get_media(db, media_id)
     with WRITE_LOCK:
         db.collection(MEDIA).delete(item["_id"], message=f"pixel: remove {item.get('filename', '')}")
-        files = [
-            path
-            for path in (
-                safe_media_path(settings, item.get("path")),
-                safe_media_path(settings, item.get("thumb")),
-            )
-            if path is not None
-        ]
+        files = []
+        for field in ("path", "thumb"):
+            path = safe_media_path(settings, item.get(field))
+            if path is not None:
+                files.append(path)
+            elif item.get(field) is not None:
+                log.warning("Skipping invalid media %s path for %s", field, item["_id"])
         if files:
             commit_files(db, {}, files, message=f"pixel: delete files of {item['_id']}")
         album_id = item.get("album")

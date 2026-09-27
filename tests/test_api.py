@@ -96,6 +96,16 @@ def test_trusted_forwarded_https_sets_a_secure_session_cookie(settings: Settings
     assert "Secure" in response.headers["set-cookie"]
 
 
+def test_trusted_proxy_falls_back_to_direct_https_for_session_cookie(settings: Settings) -> None:
+    with TestClient(
+        create_app(replace(settings, trust_proxy=True)),
+        base_url="https://testserver",
+        headers={"X-Pixel": "1"},
+    ) as client:
+        response = client.post("/api/login", json={"token": OWNER})
+    assert "Secure" in response.headers["set-cookie"]
+
+
 def test_anonymous_permissions_use_the_configured_ttl(
     github: tuple[FakeGitHub, str], settings: Settings
 ) -> None:
