@@ -31,6 +31,10 @@ class AuditLog:
         self.settings = settings
         self.repo = settings.audit_repo or settings.repo
         self.enabled = settings.audit_enabled
+        if self.enabled and self.repo.lower() == settings.repo.lower():
+            # Everyone who can read the album could read visitors' IP addresses,
+            # and uploaders could rewrite the log.
+            raise RuntimeError("PIXEL_AUDIT_REPO must be a separate, private repository")
         self._pending: List[Dict[str, Any]] = []
         self._lock = threading.Lock()
         self._flush_lock = threading.Lock()

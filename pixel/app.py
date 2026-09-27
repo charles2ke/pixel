@@ -35,7 +35,8 @@ from .github import Access, current_user, open_raw, repository_access
 from .sessions import COOKIE, Session, SessionStore
 
 STATIC = Path(__file__).with_name("static")
-ANONYMOUS_ACCESS_TTL = 60.0
+# Unauthenticated GitHub API calls are limited to 60 per hour per IP address.
+ANONYMOUS_ACCESS_TTL = 600.0
 CSRF_HEADER = "x-pixel"
 
 CSP = "; ".join(
@@ -121,6 +122,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 return cached
         try:
             access = repository_access(anonymous_client, settings.repo)
+        except RateLimitError:
+            if cached is None:
+                raise
+            access = cached  # keep the last known answer until the limit resets
         except GitDbError:
             access = Access.none()
         with anonymous_lock:
@@ -373,8 +378,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         who = require_view(request, viewer(request))
         item = store.get_media(who.db, media_id)
         range_header = request.headers.get("range")
-        if not range_header or range_header.replace(" ", "") in {"bytes=0-", "bytes=0-1"}:
-            # Video players fetch many ranges; only the first one is a "view".
+        if not range_header or range_header.replace(" ", "") == "bytes=0-":
+            # Video players fetch many ranges (Safari probes bytes=0-1 first);
+            # only the request for the whole file counts as a "view".
             record(request, who, "view_media", album=item.get("album"), media=item["_id"])
         return stream(request, who, item, "original")
 

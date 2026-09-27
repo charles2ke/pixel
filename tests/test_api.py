@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 
+import pytest
 from fastapi.testclient import TestClient
 
 from pixel import store
@@ -268,6 +269,22 @@ def test_audit_is_optional(settings: Settings) -> None:
         assert client.get("/api/session").json()["audit_enabled"] is False
         sign_in(client, OWNER)
         assert client.get("/api/audit").json() == {"enabled": False, "events": []}
+
+
+def test_a_video_view_is_audited_once_despite_range_probes(client: TestClient) -> None:
+    sign_in(client, OWNER)
+    item = upload(client, create_album(client), "clip.mp4", mp4()).json()["id"]
+    for byte_range in ("bytes=0-1", "bytes=0-", "bytes=100-199"):
+        client.get(f"/api/media/{item}/original", headers={"Range": byte_range})
+    views = [e for e in client.get("/api/audit").json()["events"] if e["event"] == "view_media"]
+    assert len(views) == 1
+
+
+def test_audit_log_must_not_share_the_album_repository(settings: Settings) -> None:
+    with pytest.raises(RuntimeError, match="PIXEL_AUDIT_REPO"):
+        create_app(replace(settings, audit_repo=None))
+    with pytest.raises(RuntimeError, match="PIXEL_AUDIT_REPO"):
+        create_app(replace(settings, audit_repo=settings.repo))
 
 
 # ----------------------------------------------------------------- install

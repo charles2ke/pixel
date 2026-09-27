@@ -47,7 +47,9 @@ media/<album>/<id>.<ext>   the original photo or video
 media/<album>/<id>.thumb.jpg
 ```
 
-The audit log is stored in `data/audit/…` of `PIXEL_AUDIT_REPO`.
+The audit log is stored in `data/audit/…` of `PIXEL_AUDIT_REPO`, which must be a
+separate repository (pixel refuses to start otherwise) so album viewers cannot
+read visitors' IP addresses.
 
 ## Setup
 
@@ -80,7 +82,7 @@ The audit log is stored in `data/audit/…` of `PIXEL_AUDIT_REPO`.
 | `PIXEL_DATA_ROOT` | `data` | GitDb root folder |
 | `PIXEL_MEDIA_ROOT` | `media` | Folder for photo/video files |
 | `PIXEL_MAX_UPLOAD_MB` | `50` | Largest accepted upload (GitHub's hard limit is 100 MB per file) |
-| `PIXEL_AUDIT_REPO` | `PIXEL_REPO` | Repository for the visitor audit log |
+| `PIXEL_AUDIT_REPO` | *(required with a token)* | Private repository for the visitor audit log; must differ from `PIXEL_REPO` |
 | `PIXEL_AUDIT_BRANCH` | `PIXEL_BRANCH` | Branch for the audit log |
 | `PIXEL_AUDIT_TOKEN` | *(none)* | Token used to write audit entries; without it events only go to the server log |
 | `PIXEL_AUDIT_FLUSH_SECONDS` | `10` | How often buffered audit events are committed |
