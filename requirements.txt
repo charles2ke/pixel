@@ -1,0 +1,5 @@
+gitdb-py @ git+https://github.com/charles2ke/GitDb.git@d4db6fa037da26c133e813eb5c68e7ff8a485e3e
+fastapi>=0.115
+uvicorn>=0.30
+python-multipart>=0.0.18
+requests>=2.32
