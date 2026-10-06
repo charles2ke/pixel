@@ -73,6 +73,24 @@ read visitors' IP addresses.
    secure cookies all require it. Run a **single** worker process: sessions are
    in memory and writes are serialised in-process.
 
+### Deploying
+
+GitHub Pages only serves static files, so it cannot run pixel. The
+[Pages workflow](https://github.com/charles2ke/pixel/blob/main/.github/workflows/pages.yml) publishes this README as the
+project page on every push to `main`. To turn it on, go to **Settings → Pages**
+and set **Source** to **GitHub Actions**.
+
+Run the app itself on any host that runs containers (Render, Fly.io, Railway,
+a VPS, …) with the included `Dockerfile`:
+
+```sh
+docker build -t pixel .
+docker run -p 8000:8000 --env-file .env pixel
+```
+
+The container listens on `$PORT` (default `8000`) with a single worker. Put it
+behind HTTPS and set `PIXEL_TRUST_PROXY=1` when a proxy terminates TLS.
+
 ### Configuration
 
 | Variable | Default | Meaning |
