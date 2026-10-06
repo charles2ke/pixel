@@ -93,7 +93,7 @@ docker run -p 8000:8000 --env-file .env ghcr.io/charles2ke/pixel:latest
 | Tag | Built from |
 | --- | --- |
 | `latest`, `main` | The newest commit on `main` |
-| `v1`, `v2`, … | A `v*` git tag (pushed, or created with a new GitHub release) |
+| `v*` | A `v*` git tag created after this workflow was added (pushed, or created with a new GitHub release) |
 | `sha-<commit>` | A single commit (short SHA) |
 
 A new package starts out **private**, even when the repository is public. To
