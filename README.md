@@ -81,7 +81,27 @@ project page on every push to `main`. To turn it on, go to **Settings → Pages*
 and set **Source** to **GitHub Actions**.
 
 Run the app itself on any host that runs containers (Render, Fly.io, Railway,
-a VPS, …) with the included `Dockerfile`:
+a VPS, …). The
+[container image workflow](https://github.com/charles2ke/pixel/blob/main/.github/workflows/docker-publish.yml)
+publishes a ready-made image for `linux/amd64` and `linux/arm64` to GitHub
+Packages:
+
+```sh
+docker run -p 8000:8000 --env-file .env ghcr.io/charles2ke/pixel:latest
+```
+
+| Tag | Built from |
+| --- | --- |
+| `latest`, `main` | The newest commit on `main` |
+| `v*` | A `v*` git tag created after this workflow was added (pushed, or created with a new GitHub release) |
+| `sha-<commit>` | A single commit (short SHA) |
+
+A new package starts out **private**, even when the repository is public. To
+let anyone pull it without signing in, open it from the repository's
+**Packages** list, choose **Package settings**, and under **Danger Zone** use
+**Change visibility → Public** (a public package cannot be made private again).
+
+Or build the image yourself from the included `Dockerfile`:
 
 ```sh
 docker build -t pixel .
