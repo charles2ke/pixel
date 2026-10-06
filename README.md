@@ -1,6 +1,6 @@
 # pixel
 
-Photo Album — a personal photo and video album whose storage **is a GitHub
+A personal photo and video album whose storage **is a GitHub
 repository**, managed through [GitDb](https://github.com/charles2ke/GitDb).
 
 * Photos and videos are committed to your data repository; album and media
