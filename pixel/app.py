@@ -6,12 +6,13 @@ Run with ``PIXEL_REPO=owner/name uvicorn pixel.app:app``. See README.md.
 from __future__ import annotations
 
 import logging
+import secrets
 import threading
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Tuple
 from urllib.parse import quote
 
 from fastapi import Body, Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
@@ -28,7 +29,7 @@ from gitdb import (
 )
 from gitdb import ValidationError as GitDbValidationError
 
-from . import store
+from . import archive, store
 from .audit import AuditLog
 from .config import Settings
 from .github import Access, current_user, open_raw, repository_access
@@ -36,6 +37,9 @@ from .sessions import COOKIE, Session, SessionStore
 
 STATIC = Path(__file__).with_name("static")
 CSRF_HEADER = "x-pixel"
+#: How long a prepared download of selected items stays valid.
+SELECTION_TTL = 600
+MAX_SELECTIONS = 256
 
 CSP = "; ".join(
     [
@@ -80,6 +84,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     anonymous_client = GitHubClient(None, api_url=settings.api_url)
     anonymous_state: Dict[str, Any] = {"access": None, "checked": 0.0}
     anonymous_lock = threading.Lock()
+    #: Prepared downloads: token -> (expires, session id, album id, media ids).
+    selections: Dict[str, Tuple[float, Optional[str], str, List[str]]] = {}
+    selections_lock = threading.Lock()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -212,6 +219,56 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         )
         return StreamingResponse(raw.iter_bytes(), status_code=raw.status, media_type=mime, headers=headers)
 
+    def remember_selection(who: Viewer, album_id: str, ids: List[str]) -> str:
+        token = secrets.token_urlsafe(24)
+        now = time.monotonic()
+        with selections_lock:
+            for key in [key for key, value in selections.items() if value[0] <= now]:
+                del selections[key]
+            while len(selections) >= MAX_SELECTIONS:
+                del selections[next(iter(selections))]
+            owner = who.session.sid if who.session else None
+            selections[token] = (now + SELECTION_TTL, owner, album_id, ids)
+        return token
+
+    def recall_selection(token: str, who: Viewer, album_id: str) -> Optional[List[str]]:
+        with selections_lock:
+            found = selections.get(token)
+        if found is None:
+            return None
+        expires, owner, album, ids = found
+        if expires <= time.monotonic() or album != album_id:
+            return None
+        if owner != (who.session.sid if who.session else None):
+            return None
+        return ids
+
+    def zip_response(who: Viewer, album: Dict[str, Any], items: List[Dict[str, Any]]) -> Response:
+        def opener(path: Optional[str]) -> Any:
+            def fetch() -> Iterator[bytes]:
+                if path is None:
+                    raise NotFoundError("not a valid media path")
+                raw = open_raw(settings.raw_url, settings.repo, settings.branch, path, who.token)
+                return raw.iter_bytes()
+
+            return fetch
+
+        names = archive.unique_names(
+            archive.safe_name(str(item.get("filename") or ""), str(item["_id"])) for item in items
+        )
+        entries = [
+            archive.Entry(
+                name=name,
+                size=item.get("size") if isinstance(item.get("size"), int) else None,
+                modified=item.get("_created_at"),
+                fetch=opener(store.safe_media_path(settings, item.get("path"))),
+            )
+            for item, name in zip(items, names)
+        ]
+        filename = archive.safe_name(str(album.get("title") or ""), str(album["_id"])) + ".zip"
+        headers = {"Content-Disposition": disposition("attachment", filename), "Cache-Control": "no-store"}
+        return StreamingResponse(archive.stream_zip(entries), media_type="application/zip", headers=headers)
+
     # --------------------------------------------------------- middleware
     @app.middleware("http")
     async def security_headers(request: Request, call_next: Any) -> Response:
@@ -343,12 +400,48 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         record(request, who, "view_album", album=found["_id"])
         return {**store.public_album(found), "items": [store.public_media(item) for item in items]}
 
-    @app.delete("/api/albums/{album_id}", dependencies=[Depends(csrf)])
-    def remove_album(request: Request, album_id: str) -> Dict[str, bool]:
+    @app.patch("/api/albums/{album_id}", dependencies=[Depends(csrf)])
+    def edit_album(request: Request, album_id: str, payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         who = require_write(request, viewer(request))
-        store.delete_album(who.db, album_id)
-        record(request, who, "delete_album", album=album_id)
-        return {"ok": True}
+        changes = {key: payload[key] for key in ("title", "description", "cover") if key in payload}
+        if not changes:
+            raise HTTPException(422, "nothing to change")
+        found = store.update_album(who.db, album_id, changes)
+        record(request, who, "update_album", album=found["_id"], fields=",".join(sorted(changes)))
+        return store.public_album(found)
+
+    @app.delete("/api/albums/{album_id}", dependencies=[Depends(csrf)])
+    def remove_album(request: Request, album_id: str, with_media: bool = False) -> Dict[str, Any]:
+        who = require_write(request, viewer(request))
+        deleted = store.delete_album(settings, who.db, album_id, with_media=with_media)
+        record(request, who, "delete_album", album=album_id, count=deleted)
+        return {"ok": True, "deleted": deleted}
+
+    @app.get("/api/albums/{album_id}/download")
+    def download_album(request: Request, album_id: str, selection: Optional[str] = None) -> Response:
+        who = require_view(request, viewer(request))
+        found = store.get_album(who.db, album_id)
+        items = store.album_media(who.db, found["_id"])
+        if selection is not None:
+            ids = recall_selection(selection, who, found["_id"])
+            if ids is None:
+                raise HTTPException(404, "This download has expired. Select the items again.")
+            by_id = {item["_id"]: item for item in items}
+            items = [by_id[media_id] for media_id in ids if media_id in by_id]
+        if not items:
+            raise HTTPException(404, "There is nothing to download.")
+        record(request, who, "download_album", album=found["_id"], count=len(items))
+        return zip_response(who, found, items)
+
+    @app.post("/api/albums/{album_id}/download", dependencies=[Depends(csrf)])
+    def prepare_download(
+        request: Request, album_id: str, payload: Dict[str, Any] = Body(...)
+    ) -> Dict[str, str]:
+        """Remember a selection so the browser can download it with a short GET URL."""
+        who = require_view(request, viewer(request))
+        found = store.get_album(who.db, album_id)
+        token = remember_selection(who, found["_id"], store.clean_ids(payload.get("ids")))
+        return {"url": f"/api/albums/{quote(found['_id'])}/download?selection={token}"}
 
     # -------------------------------------------------------------- media
     @app.post("/api/albums/{album_id}/media", dependencies=[Depends(csrf)], status_code=201)
@@ -382,6 +475,38 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         record(request, who, "delete_media", album=item.get("album"), media=media_id)
         return {"ok": True}
 
+    @app.patch("/api/media/{media_id}", dependencies=[Depends(csrf)])
+    def edit_media(request: Request, media_id: str, payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+        who = require_write(request, viewer(request))
+        changes = {key: payload[key] for key in ("title", "description") if key in payload}
+        if not changes:
+            raise HTTPException(422, "nothing to change")
+        item = store.update_media(who.db, media_id, changes)
+        record(
+            request,
+            who,
+            "update_media",
+            album=item.get("album"),
+            media=item["_id"],
+            fields=",".join(sorted(changes)),
+        )
+        return store.public_media(item)
+
+    @app.post("/api/albums/{album_id}/media/move", dependencies=[Depends(csrf)])
+    def move_media(request: Request, album_id: str, payload: Dict[str, Any] = Body(...)) -> Dict[str, int]:
+        who = require_write(request, viewer(request))
+        target = payload.get("album")
+        items = store.move_media(settings, who.db, album_id, payload.get("ids"), target)
+        record(request, who, "move_media", album=album_id, target=target, count=len(items))
+        return {"moved": len(items)}
+
+    @app.post("/api/albums/{album_id}/media/delete", dependencies=[Depends(csrf)])
+    def remove_many(request: Request, album_id: str, payload: Dict[str, Any] = Body(...)) -> Dict[str, int]:
+        who = require_write(request, viewer(request))
+        items = store.delete_media_many(settings, who.db, album_id, payload.get("ids"))
+        record(request, who, "delete_media", album=album_id, count=len(items))
+        return {"deleted": len(items)}
+
     @app.get("/api/media/{media_id}/thumb")
     def thumb(request: Request, media_id: str) -> Response:
         who = require_view(request, viewer(request))
@@ -408,12 +533,21 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     # -------------------------------------------------------------- audit
     @app.get("/api/audit")
-    def audit(request: Request, limit: int = 200) -> Dict[str, Any]:
-        who = viewer(request)
-        if who.session is None or not who.access.is_admin:
-            record(request, who, "access_denied", need="admin")
+    def audit(
+        request: Request,
+        limit: int = 200,
+        before: Optional[str] = None,
+        event: Optional[str] = None,
+        who: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        reader = viewer(request)
+        if reader.session is None or not reader.access.is_admin:
+            record(request, reader, "access_denied", need="admin")
             raise HTTPException(403, "Only repository admins can read the visitor log.")
-        return {"enabled": audit_log.enabled, "events": audit_log.recent(max(1, min(limit, 500)))}
+        events, cursor = audit_log.recent(
+            max(1, min(limit, 500)), before=before or None, event=event or None, who=who or None
+        )
+        return {"enabled": audit_log.enabled, "events": events, "next": cursor}
 
     @app.get("/api/health")
     def health() -> Dict[str, str]:

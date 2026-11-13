@@ -73,7 +73,25 @@
         <p id="album-error" class="error" role="alert" hidden></p>
         <div class="actions">
           <button class="button ghost" type="button" data-close>Cancel</button>
-          <button class="button" type="submit">Create</button>
+          <button class="button" type="submit" id="album-submit">Create</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="move-dialog" aria-labelledby="move-title">
+      <form id="move-form" method="dialog">
+        <h2 id="move-title">Move to another album</h2>
+        <p id="move-summary" class="muted"></p>
+        <label for="move-target">Move to</label>
+        <select id="move-target" name="album" required></select>
+        <p class="muted small">
+          Files are moved inside the repository without uploading them again. Large selections go in
+          batches of 100, so they can take a little while.
+        </p>
+        <p id="move-error" class="error" role="alert" hidden></p>
+        <div class="actions">
+          <button class="button ghost" type="button" data-close>Cancel</button>
+          <button class="button" type="submit" id="move-submit">Move</button>
         </div>
       </form>
     </dialog>
@@ -82,13 +100,17 @@
       <div class="lightbox-bar">
         <span id="lightbox-caption" class="caption"></span>
         <span class="spacer"></span>
-        <a id="lightbox-download" class="button ghost" href="#" download>Download</a>
-        <button id="lightbox-delete" class="button danger" type="button" hidden>Delete</button>
+        <button id="lightbox-play" class="icon-button" type="button" aria-label="Play slideshow" title="Slideshow">▶</button>
+        <button id="lightbox-info-toggle" class="icon-button" type="button" aria-label="Details" title="Details (i)"
+          aria-expanded="false" aria-controls="lightbox-info">ⓘ</button>
+        <a id="lightbox-download" class="button ghost" href="#" download aria-label="Download"><span aria-hidden="true">⬇</span><span class="label">Download</span></a>
+        <button id="lightbox-delete" class="button danger" type="button" aria-label="Delete" hidden><span aria-hidden="true">🗑</span><span class="label">Delete</span></button>
         <button id="lightbox-close" class="icon-button" type="button" aria-label="Close">✕</button>
       </div>
       <button id="lightbox-prev" class="nav prev" type="button" aria-label="Previous">‹</button>
       <div id="lightbox-stage" class="stage"></div>
       <button id="lightbox-next" class="nav next" type="button" aria-label="Next">›</button>
+      <aside id="lightbox-info" class="info-panel" aria-label="Details" hidden></aside>
     </div>
 
     <div id="toast" class="toast" role="status" hidden></div>

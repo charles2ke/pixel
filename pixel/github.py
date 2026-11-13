@@ -78,31 +78,68 @@ def current_user(client: GitHubClient) -> Dict[str, Any]:
     return {"login": str(payload.get("login", "")), "avatar_url": payload.get("avatar_url")}
 
 
+def create_blob(db: GitDb, data: bytes) -> str:
+    """Upload ``data`` as a Git blob and return its sha.
+
+    Blobs are content addressed and invisible until a commit references them,
+    so they can be uploaded ahead of (and outside) the serialized commit step.
+    """
+    response = db.client.request(
+        "POST",
+        f"/repos/{db.repo}/git/blobs",
+        json={"content": base64.b64encode(data).decode("ascii"), "encoding": "base64"},
+    )
+    return str(response.json()["sha"])
+
+
+def tree_blobs(db: GitDb, folder: str) -> Dict[str, str]:
+    """Return ``{path: blob sha}`` for every file below ``folder`` on the branch.
+
+    One request lists the whole folder. A folder that does not exist yields an
+    empty mapping.
+    """
+    expression = quote(f"{db.read_ref}:{folder}", safe="")
+    try:
+        payload = db.client.get_json(f"/repos/{db.repo}/git/trees/{expression}", params={"recursive": "1"})
+    except NotFoundError:
+        return {}
+    if not isinstance(payload, Mapping):
+        return {}
+    if payload.get("truncated"):
+        raise GitDbError(f"{folder} holds too many files to list in one request", status=502)
+    return {
+        f"{folder}/{entry['path']}": str(entry["sha"])
+        for entry in payload.get("tree", [])
+        if isinstance(entry, Mapping) and entry.get("type") == "blob" and entry.get("sha")
+    }
+
+
 def commit_files(
     db: GitDb,
     puts: Mapping[str, bytes],
     deletes: Sequence[str] = (),
     *,
     message: str,
+    blobs: Optional[Mapping[str, str]] = None,
     retries: int = 3,
-) -> str:
+) -> Optional[str]:
     """Commit binary files (and removals) to ``db``'s branch in one commit.
 
-    Blobs are uploaded once; when another writer moved the branch the tree is
-    rebuilt on the new head and the non-forced ref update retried.
+    ``blobs`` places already uploaded blobs (``{path: sha}``) without sending
+    their bytes again, which is how files are copied when media moves between
+    albums. Blobs are uploaded once; when another writer moved the branch the
+    tree is rebuilt on the new head and the non-forced ref update retried.
+    Returns the new commit sha, or ``None`` when there was nothing to commit.
     """
     client = db.client
     repo = db.repo
-    blobs: Dict[str, str] = {}
+    shas: Dict[str, str] = dict(blobs or {})
     for path, data in puts.items():
-        response = client.request(
-            "POST",
-            f"/repos/{repo}/git/blobs",
-            json={"content": base64.b64encode(data).decode("ascii"), "encoding": "base64"},
-        )
-        blobs[path] = str(response.json()["sha"])
+        shas[path] = create_blob(db, data)
+    if not shas and not deletes:
+        return None
     entries: List[Dict[str, Any]] = [
-        {"path": path, "mode": BLOB_MODE, "type": "blob", "sha": sha} for path, sha in blobs.items()
+        {"path": path, "mode": BLOB_MODE, "type": "blob", "sha": sha} for path, sha in shas.items()
     ]
     entries.extend({"path": path, "mode": BLOB_MODE, "type": "blob", "sha": None} for path in deletes)
 
