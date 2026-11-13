@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import io
 import json
+import zipfile
 from dataclasses import replace
 
 import pytest
 from fastapi.testclient import TestClient
 
+from pixel import archive as archive_names
 from pixel import store
 from pixel.app import GitDbError, create_app
 from pixel.audit import AuditLog
 from pixel.config import Settings
-from pixel.github import repository_access
+from pixel.github import commit_files, repository_access
 from tests.conftest import (
     AUDIT_REPO,
     DATA_REPO,
@@ -189,6 +192,8 @@ def test_mutations_require_the_csrf_header(settings: Settings) -> None:
         assert bare.post("/api/login", json={"token": OWNER}).status_code == 403
         bare.post("/api/login", json={"token": OWNER}, headers={"X-Pixel": "1"})
         assert bare.post("/api/albums", json={"title": "x"}).status_code == 403
+        assert bare.patch("/api/albums/a", json={"title": "x"}).status_code == 403
+        assert bare.post("/api/albums/a/media/delete", json={"ids": ["b"]}).status_code == 403
 
 
 # ---------------------------------------------------------- albums/media
@@ -304,6 +309,210 @@ def test_media_paths_outside_the_media_root_are_never_served(settings: Settings)
     assert store.safe_media_path(settings, None) is None
 
 
+# ------------------------------------------------------ editing and bulk
+def test_album_title_description_and_cover_can_be_edited(client: TestClient) -> None:
+    sign_in(client, OWNER)
+    album = create_album(client)
+    upload(client, album, "a.jpg", jpeg())
+    second = upload(client, album, "b.jpg", jpeg("blue")).json()["id"]
+    foreign = upload(client, create_album(client, "Other"), "c.jpg", jpeg("green")).json()["id"]
+
+    edited = client.patch(
+        f"/api/albums/{album}", json={"title": " Rome ", "description": "Day 1\r\nDay 2", "cover": second}
+    )
+    assert edited.status_code == 200, edited.text
+    assert [edited.json()[key] for key in ("title", "description", "cover")] == [
+        "Rome",
+        "Day 1\nDay 2",
+        second,
+    ]
+    listed = {entry["id"]: entry for entry in client.get("/api/albums").json()["albums"]}
+    assert (listed[album]["title"], listed[album]["cover"], listed[album]["count"]) == ("Rome", second, 2)
+
+    for invalid in ({"cover": foreign}, {"cover": "../x"}, {"title": " "}, {}):
+        assert client.patch(f"/api/albums/{album}", json=invalid).status_code == 422
+    assert client.patch(f"/api/albums/{album}", json={"cover": None}).json()["cover"] is None
+
+
+def test_photo_title_and_caption_can_be_edited(github: tuple[FakeGitHub, str], client: TestClient) -> None:
+    state, _ = github
+    sign_in(client, OWNER)
+    album = create_album(client)
+    item = upload(client, album, "IMG_1.jpg", jpeg()).json()
+    assert (item["title"], item["description"]) == ("IMG_1", "")
+
+    response = client.patch(
+        f"/api/media/{item['id']}", json={"title": "Sunset", "description": "From the pier"}
+    )
+    assert response.status_code == 200, response.text
+    shown = client.get(f"/api/albums/{album}").json()["items"][0]
+    assert (shown["title"], shown["description"]) == ("Sunset", "From the pier")
+    document = json.loads(state.files(DATA_REPO)[f"data/media/{item['id']}.json"])
+    assert document["description"] == "From the pier" and document["path"].endswith(".jpg")
+    assert client.patch(f"/api/media/{item['id']}", json={"description": "x" * 1001}).status_code == 422
+
+    # Captions keep their line breaks; tabs become spaces and other control characters go.
+    caption = client.patch(
+        f"/api/media/{item['id']}", json={"description": " Day one\r\nAt the\tbeach\x07\n"}
+    )
+    assert caption.json()["description"] == "Day one\nAt the beach"
+
+
+def test_moving_media_moves_files_documents_and_covers(
+    github: tuple[FakeGitHub, str], client: TestClient
+) -> None:
+    state, _ = github
+    sign_in(client, OWNER)
+    source = create_album(client, "Source")
+    target = create_album(client, "Target")
+    photo, thumb = jpeg(), jpeg("green", (8, 8))
+    moved = upload(client, source, "a.jpg", photo, thumb).json()["id"]
+    kept = upload(client, source, "b.jpg", jpeg("blue")).json()["id"]
+
+    response = client.post(f"/api/albums/{source}/media/move", json={"ids": [moved], "album": target})
+    assert response.json() == {"moved": 1}, response.text
+
+    files = state.files(DATA_REPO)
+    assert files[f"media/{target}/{moved}.jpg"] == photo
+    assert files[f"media/{target}/{moved}.thumb.jpg"] == thumb
+    assert not any(path.startswith(f"media/{source}/{moved}") for path in files)
+    assert json.loads(files[f"data/media/{moved}.json"])["album"] == target
+    index = json.loads(files["data/_index/media/album.json"])["values"]
+    assert (index[source], index[target]) == ([kept], [moved])
+    albums = {entry["id"]: entry for entry in client.get("/api/albums").json()["albums"]}
+    assert (albums[source]["cover"], albums[target]["cover"]) == (kept, moved)
+    assert [item["id"] for item in client.get(f"/api/albums/{target}").json()["items"]] == [moved]
+    assert client.get(f"/api/media/{moved}/original").content == photo
+
+    move = f"/api/albums/{source}/media/move"
+    assert client.post(move, json={"ids": [kept], "album": source}).status_code == 422
+    assert client.post(move, json={"ids": [moved], "album": target}).status_code == 409
+    assert client.post(move, json={"ids": [kept], "album": "missing"}).status_code == 404
+    assert client.post(move, json={"ids": [], "album": target}).status_code == 422
+
+
+def test_selected_media_can_be_deleted_together(github: tuple[FakeGitHub, str], client: TestClient) -> None:
+    state, _ = github
+    sign_in(client, OWNER)
+    album = create_album(client)
+    ids = [
+        upload(client, album, f"{color}.jpg", jpeg(color)).json()["id"] for color in ("red", "blue", "green")
+    ]
+
+    response = client.post(f"/api/albums/{album}/media/delete", json={"ids": [ids[0], ids[2]]})
+    assert response.json() == {"deleted": 2}, response.text
+    files = state.files(DATA_REPO)
+    assert [path for path in files if path.startswith(f"media/{album}/")] == [f"media/{album}/{ids[1]}.jpg"]
+    assert [path for path in files if path.startswith("data/media/")] == [f"data/media/{ids[1]}.json"]
+    detail = client.get(f"/api/albums/{album}").json()
+    assert detail["cover"] == ids[1] and [item["id"] for item in detail["items"]] == [ids[1]]
+    assert client.post(f"/api/albums/{album}/media/delete", json={"ids": [ids[0]]}).status_code == 409
+
+
+def test_an_album_can_be_deleted_with_everything_in_it(
+    github: tuple[FakeGitHub, str], client: TestClient
+) -> None:
+    state, _ = github
+    sign_in(client, OWNER)
+    album = create_album(client)
+    keep = create_album(client, "Keep")
+    upload(client, album, "a.jpg", jpeg(), jpeg("blue", (8, 8)))
+    upload(client, album, "b.mp4", mp4())
+    kept = upload(client, keep, "c.jpg", jpeg()).json()["id"]
+    assert client.delete(f"/api/albums/{album}").status_code == 409
+
+    response = client.delete(f"/api/albums/{album}?with_media=true")
+    assert response.json() == {"ok": True, "deleted": 2}, response.text
+    files = state.files(DATA_REPO)
+    assert not any(path.startswith(f"media/{album}/") for path in files)
+    assert [path for path in files if path.startswith("data/media/")] == [f"data/media/{kept}.json"]
+    assert client.get(f"/api/albums/{album}").status_code == 404
+    assert [(entry["id"], entry["count"]) for entry in client.get("/api/albums").json()["albums"]] == [
+        (keep, 1)
+    ]
+
+
+def test_albums_and_selections_download_as_zip(
+    github: tuple[FakeGitHub, str], settings: Settings, client: TestClient
+) -> None:
+    sign_in(client, OWNER)
+    album = create_album(client, "Summer: best/of")
+    first = upload(client, album, "IMG.jpg", jpeg()).json()["id"]
+    second = upload(client, album, "img.JPG", jpeg("blue")).json()["id"]
+    video = upload(client, album, "clip.mp4", mp4()).json()["id"]
+
+    response = client.get(f"/api/albums/{album}/download")
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "application/zip"
+    assert 'attachment; filename="Summer_ best_of.zip"' in response.headers["content-disposition"]
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert archive.testzip() is None
+        assert archive.namelist() == ["IMG.jpg", "img (2).JPG", "clip.mp4"]
+        assert archive.read("img (2).JPG") == jpeg("blue") and archive.read("clip.mp4") == mp4()
+
+    url = client.post(f"/api/albums/{album}/download", json={"ids": [video, first]}).json()["url"]
+    with zipfile.ZipFile(io.BytesIO(client.get(url).content)) as archive:
+        assert archive.namelist() == ["clip.mp4", "IMG.jpg"]
+    assert client.get(f"/api/albums/{album}/download?selection=unknown").status_code == 404
+    with make_client(settings) as other:
+        sign_in(other, OWNER)
+        assert other.get(url).status_code == 404
+
+    commit_files(store.open_db(settings, OWNER), {}, [f"media/{album}/{second}.jpg"], message="lose a file")
+    with zipfile.ZipFile(io.BytesIO(client.get(f"/api/albums/{album}/download").content)) as archive:
+        assert archive.namelist() == ["IMG.jpg", "clip.mp4", "MISSING.txt"]
+        assert "img (2).JPG" in archive.read("MISSING.txt").decode()
+
+
+def test_viewers_can_download_but_not_change_albums(settings: Settings) -> None:
+    with make_client(settings) as owner:
+        sign_in(owner, OWNER)
+        album = create_album(owner)
+        other = create_album(owner, "Other")
+        item = upload(owner, album, "a.jpg", jpeg()).json()["id"]
+    with make_client(settings) as friend:
+        sign_in(friend, FRIEND)
+        attempts = [
+            friend.patch(f"/api/albums/{album}", json={"title": "x"}),
+            friend.patch(f"/api/media/{item}", json={"title": "x"}),
+            friend.post(f"/api/albums/{album}/media/move", json={"ids": [item], "album": other}),
+            friend.post(f"/api/albums/{album}/media/delete", json={"ids": [item]}),
+            friend.delete(f"/api/albums/{album}?with_media=true"),
+        ]
+        assert [attempt.status_code for attempt in attempts] == [403] * len(attempts)
+        assert friend.get(f"/api/albums/{album}/download").status_code == 200
+    with make_client(settings) as guest:
+        assert guest.get(f"/api/albums/{album}/download").status_code == 401
+
+
+def test_changes_made_in_another_session_are_seen(settings: Settings) -> None:
+    with make_client(settings) as first, make_client(settings) as second:
+        sign_in(first, OWNER)
+        sign_in(second, OWNER)
+        album = create_album(first)
+        item = upload(first, album, "a.jpg", jpeg()).json()["id"]
+        assert first.get("/api/albums").json()["albums"][0]["count"] == 1
+        assert first.get(f"/api/albums/{album}").json()["items"][0]["title"] == "a"
+
+        second.patch(f"/api/albums/{album}", json={"title": "Renamed"})
+        second.patch(f"/api/media/{item}", json={"title": "Sunset"})
+        upload(second, album, "b.jpg", jpeg("blue"))
+
+        listed = first.get("/api/albums").json()["albums"][0]
+        assert (listed["title"], listed["count"]) == ("Renamed", 2)
+        assert first.get(f"/api/albums/{album}").json()["items"][0]["title"] == "Sunset"
+
+
+def test_archive_member_names_are_portable_and_unique() -> None:
+    assert archive_names.safe_name('a<b>:c"d/e\\f|g?h*.jpg') == "a_b__c_d_e_f_g_h_.jpg"
+    assert archive_names.safe_name(" .. ", "fallback") == "fallback"
+    assert archive_names.safe_name("con.txt") == "_con.txt"
+    long_name = archive_names.safe_name("x" * 300 + ".jpeg")
+    assert len(long_name) == 150 and long_name.endswith("x.jpeg")
+    names = archive_names.unique_names(["a.jpg", "A.JPG", "a.jpg", "b"])
+    assert names == ["a.jpg", "A (2).JPG", "a (3).jpg", "b"]
+
+
 def test_delete_media_validates_document_paths(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
     deleted: list[str] = []
 
@@ -376,7 +585,37 @@ def test_audit_is_optional(settings: Settings) -> None:
     with make_client(replace(settings, audit_token=None)) as client:
         assert client.get("/api/session").json()["audit_enabled"] is False
         sign_in(client, OWNER)
-        assert client.get("/api/audit").json() == {"enabled": False, "events": []}
+        assert client.get("/api/audit").json() == {"enabled": False, "events": [], "next": None}
+
+
+def test_visitor_log_can_be_filtered_and_paged(settings: Settings) -> None:
+    with make_client(settings) as guest:
+        guest.get("/api/session?visit=1")
+    with make_client(settings) as owner:
+        sign_in(owner, OWNER)
+        upload(owner, create_album(owner), "a.jpg", jpeg())
+        everything = owner.get("/api/audit").json()
+        assert len(everything["events"]) >= 4 and everything["next"] is None
+
+        first = owner.get("/api/audit?limit=2").json()
+        assert first["events"] == everything["events"][:2]
+        second = owner.get(f"/api/audit?limit=2&before={first['next']}").json()
+        assert second["events"] == everything["events"][2:4]
+
+        uploads = owner.get("/api/audit?event=upload").json()["events"]
+        assert [event["event"] for event in uploads] == ["upload"]
+        mine = owner.get("/api/audit?who=@Charles2KE").json()["events"]
+        assert mine and all(event.get("login") == "charles2ke" for event in mine)
+        assert len(mine) < len(everything["events"])
+
+
+def test_visitor_log_keeps_the_order_of_events_flushed_together(settings: Settings) -> None:
+    audit = AuditLog(settings)
+    for number in range(60):
+        audit.record("view_album", n=number)
+    assert audit.flush() == 60
+    events, _ = audit.recent(limit=60)
+    assert [event["n"] for event in events] == list(range(59, -1, -1))
 
 
 def test_public_audit_repository_prevents_startup(github: tuple[FakeGitHub, str], settings: Settings) -> None:
