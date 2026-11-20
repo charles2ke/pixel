@@ -1301,7 +1301,7 @@ async function setCover() {
   if (button) button.disabled = true;
   try {
     const updated = await api(`/api/albums/${encodeURIComponent(state.album.id)}`, { method: "PATCH", json: { cover: item.id } });
-    Object.assign(state.album, updated);
+    if (state.view === "album" && state.album && state.album.id === updated.id) Object.assign(state.album, updated);
     toast("Album cover updated");
   } catch (error) {
     toast(error.message, "error");
