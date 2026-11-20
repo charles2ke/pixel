@@ -12,7 +12,8 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from typing import Any, Dict, List, Optional
+from bisect import bisect_left
+from typing import Any, Dict, List, Optional, Tuple
 
 from gitdb import GitDb, GitDbError, GitHubClient, new_id
 
@@ -22,6 +23,9 @@ from .github import repository_access
 AUDIT = "audit"
 MAX_PENDING = 5000
 MAX_FIELD = 300
+#: Most events one filtered visitor-log request reads. Each event not read
+#: before costs one GitHub API request (later reads come from the cache).
+SCAN_LIMIT = 1000
 
 log = logging.getLogger("pixel.audit")
 
@@ -114,9 +118,12 @@ class AuditLog:
             if not batch:
                 return 0
             try:
+                # Ids minted in the same millisecond sort randomly; sorting them
+                # keeps the log in the order the events happened.
+                ids = sorted(new_id() for _ in batch)
                 with self.db.batch(message=f"pixel audit: {len(batch)} event(s)") as writer:
-                    for entry in batch:
-                        writer.put(AUDIT, new_id(), entry)
+                    for key, entry in zip(ids, batch):
+                        writer.put(AUDIT, key, entry)
             except GitDbError as exc:
                 log.error("could not write %d audit event(s): %s", len(batch), exc)
                 with self._lock:
@@ -124,17 +131,59 @@ class AuditLog:
                 return 0
             return len(batch)
 
-    def recent(self, limit: int = 200) -> List[Dict[str, Any]]:
-        """Return the newest events first (admin only)."""
+    def recent(
+        self,
+        limit: int = 200,
+        *,
+        before: Optional[str] = None,
+        event: Optional[str] = None,
+        who: Optional[str] = None,
+    ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+        """Return events newest first, plus the cursor (``before``) of older ones.
+
+        ``event`` keeps one kind of event; ``who`` keeps events whose login or
+        IP address contains it. A filtered request examines at most
+        :data:`SCAN_LIMIT` events, so it can return fewer than ``limit`` events
+        and still a cursor to look further back.
+        """
         if not self.enabled or self.db is None:
-            return []
-        self.flush()
+            return [], None
+        if before is None:
+            self.flush()
         collection = self.db.collection(AUDIT)
         ids = collection.list()
-        after = ids[-limit - 1] if len(ids) > limit else None
-        events = list(collection.all(after=after))
-        events.reverse()
-        return [
-            {key: value for key, value in event.items() if key not in {"_rev", "_updated_at"}}
-            for event in events
-        ]
+        end = bisect_left(ids, before) if before else len(ids)
+        needle = (who or "").strip().lstrip("@").lower()
+        filtered = bool(event or needle)
+        budget = SCAN_LIMIT if filtered else limit
+        window = max(limit, 250) if filtered else limit
+        found: List[Dict[str, Any]] = []
+        while end > 0 and budget > 0:
+            start = max(0, end - min(window, budget))
+            budget -= end - start
+            chunk = collection.all(limit=end - start, after=ids[start - 1] if start else None)
+            documents = {document.get("_id"): document for document in chunk}
+            for position in range(end - 1, start - 1, -1):
+                document = documents.get(ids[position])
+                if document is None or not _matches(document, event, needle):
+                    continue
+                found.append(document)
+                if len(found) == limit:
+                    return _public(found), ids[position] if position > 0 else None
+            end = start
+        return _public(found), ids[end] if end > 0 else None
+
+
+def _matches(document: Dict[str, Any], event: Optional[str], needle: str) -> bool:
+    if event and document.get("event") != event:
+        return False
+    if not needle:
+        return True
+    values = (document.get("login"), document.get("attempted_login"), document.get("ip"))
+    return any(isinstance(value, str) and needle in value.lower() for value in values)
+
+
+def _public(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [
+        {key: value for key, value in event.items() if key not in {"_rev", "_updated_at"}} for event in events
+    ]

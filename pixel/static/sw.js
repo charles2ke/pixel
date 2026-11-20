@@ -1,7 +1,7 @@
 // Pixel service worker: caches the app shell only, so the app installs and
 // opens offline. Photos, videos and every /api/ response are private to the
 // signed-in visitor and are never cached here.
-const VERSION = "pixel-v1";
+const VERSION = "pixel-v2";
 const SHELL = [
   "/",
   "/static/app.js",

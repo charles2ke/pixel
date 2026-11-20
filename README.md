@@ -9,12 +9,16 @@ repository**, managed through [GitDb](https://github.com/charles2ke/GitDb).
   that GitHub would not show the visitor: every request is made to GitHub with
   the visitor's own token.
 * Albums show a thumbnail grid. Tapping a thumbnail opens the full photo, or
-  plays the video (streamed with HTTP range requests, so seeking works).
+  plays the video (streamed with HTTP range requests, so seeking works). Each
+  open photo has its own link, and an album can play as a slideshow.
+* **Organise from the browser:** edit albums, give photos a title and caption,
+  pick the album cover, and select many photos at once to move them to another
+  album, delete them or download them as one ZIP file.
 * **Downloads follow repository access too** — only visitors who can read the
   repository can download originals.
 * **Visitors are audited** (visits, sign-ins, denied access, views, downloads,
-  uploads, deletions) into a GitDb collection that only repository admins can
-  read in the app.
+  uploads, edits, moves, deletions) into a GitDb collection that only repository
+  admins can read — and filter by event or person — in the app.
 * Installable as an app (PWA) on Android, iPhone and iPad.
 
 ## How access works
@@ -22,8 +26,8 @@ repository**, managed through [GitDb](https://github.com/charles2ke/GitDb).
 | Visitor's access to `PIXEL_REPO` | What they can do in pixel |
 | --- | --- |
 | No access (private repo, not a collaborator) | Nothing — they are told the album is private |
-| Read (`pull`), or anyone if the repo is public | Browse, view, play and download |
-| Write (`push`) | …plus create albums, upload and delete |
+| Read (`pull`), or anyone if the repo is public | Browse, view, play, watch slideshows and download (also as ZIP) |
+| Write (`push`) | …plus create, edit and delete albums; upload, caption, move and delete photos and videos |
 | Admin | …plus read the visitor audit log |
 
 Visitors sign in by pasting a GitHub token (a fine-grained personal access
@@ -36,6 +40,28 @@ without restarting pixel.
 
 To share with family: make the data repository private and invite them as
 collaborators with *Read* access. To share with everyone: make it public.
+
+## Using pixel
+
+* **Album menu (⋯):** *Download all (ZIP)*, and for uploaders *Edit album*
+  (title and description) and *Delete album*. An album that still holds photos
+  and videos is only deleted after a confirmation that names how many.
+* **Select:** tap or click photos (Shift-click selects a range, *Select all*
+  everything) to download them as one ZIP file or, with write access, move them
+  to another album or delete them. Esc leaves select mode.
+* **Viewer:** ← / → or swipe to step through the album, **i** shows the details
+  (file, type, size, uploader, date; uploaders can edit the title and caption,
+  set the album cover or move the photo), ▶ starts a slideshow, Esc closes.
+  The slideshow shows each photo for 4 seconds, plays videos to the end, keeps
+  the screen awake where the browser allows it, and stops after the last item.
+* **Links:** an open photo's address (`#/album/<album>/<photo>`) opens that
+  photo again — after a reload, with the back button, or for anyone else with
+  access.
+* **Uploads:** drop files on the album, use **Upload**, or paste an image
+  (Ctrl/⌘+V) while the album is open. Three files upload at a time; failed
+  uploads stay listed with *Retry*. The first upload becomes the album cover.
+* **Visitors** (admins): filter by event and by login or IP address, and use
+  *Load older* to page back through the log.
 
 ## Repository layout
 
@@ -157,6 +183,15 @@ browsers that support them (for example Safari).
   few GB; this is meant for a personal album, not a backup of everything.
 * Anonymous visitors of a public repository are served through
   `raw.githubusercontent.com`, which can lag a few minutes behind new uploads.
+* Moves and deletions of a selection are sent 100 at a time (the server takes
+  at most 500 per request), and each request is a few commits, so very large
+  selections take a while. Moving reuses the stored files, so nothing is
+  uploaded again.
+* A ZIP of a selection holds at most 500 photos and videos; *Download all*
+  has no limit. ZIP files are streamed while the originals are read from
+  GitHub and are not compressed further (photos and videos already are).
+* A filtered visitor-log page looks through at most 1,000 events; *Load older*
+  continues from there.
 * One server process only (see Setup).
 
 ## Development
