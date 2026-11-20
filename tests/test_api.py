@@ -391,6 +391,47 @@ def test_moving_media_moves_files_documents_and_covers(
     assert client.post(move, json={"ids": [], "album": target}).status_code == 422
 
 
+def test_move_keeps_copies_when_metadata_commit_reports_an_error(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    media_id = store.new_id()
+    source_id, target_id = store.new_id(), store.new_id()
+    item = {"_id": media_id, "path": f"media/{source_id}/{media_id}.jpg"}
+    source = {"_id": source_id, "cover": media_id}
+    target = {"_id": target_id, "title": "Target"}
+    path = item["path"]
+    commits: list[tuple[object, ...]] = []
+
+    class Batch:
+        @staticmethod
+        def put(*_args: object) -> None:
+            pass
+
+        @staticmethod
+        def commit() -> None:
+            raise GitDbError("GitHub accepted the commit but the response was lost")
+
+    class Db:
+        @staticmethod
+        def batch(_message: str) -> Batch:
+            return Batch()
+
+    def fake_commit_files(*args: object, **_kwargs: object) -> None:
+        commits.append(args)
+
+    monkeypatch.setattr(store, "get_album", lambda _db, album_id: source if album_id == source_id else target)
+    monkeypatch.setattr(store, "album_media", lambda _db, _album_id: [item])
+    monkeypatch.setattr(store, "media_files", lambda _settings, _item, _action: [path])
+    monkeypatch.setattr(store, "_existing_files", lambda _db, moves: {path: "blob-sha"})
+    monkeypatch.setattr(store, "commit_files", fake_commit_files)
+
+    with pytest.raises(GitDbError, match="response was lost"):
+        store.move_media(settings, Db(), source_id, [media_id], target_id)
+
+    assert len(commits) == 1
+    assert commits[0][1] == {}
+
+
 def test_selected_media_can_be_deleted_together(github: tuple[FakeGitHub, str], client: TestClient) -> None:
     state, _ = github
     sign_in(client, OWNER)
@@ -509,8 +550,15 @@ def test_archive_member_names_are_portable_and_unique() -> None:
     assert archive_names.safe_name("con.txt") == "_con.txt"
     long_name = archive_names.safe_name("x" * 300 + ".jpeg")
     assert len(long_name) == 150 and long_name.endswith("x.jpeg")
+    unicode_name = archive_names.safe_name("日" * 100 + ".jpg")
+    assert len(unicode_name.encode("utf-8")) <= archive_names.MAX_NAME
+    assert unicode_name.endswith(".jpg")
     names = archive_names.unique_names(["a.jpg", "A.JPG", "a.jpg", "b"])
     assert names == ["a.jpg", "A (2).JPG", "a (3).jpg", "b"]
+    normalized_names = archive_names.unique_names(["é.jpg", "e\u0301.jpg"])
+    assert normalized_names == ["é.jpg", "e\u0301 (2).jpg"]
+    long_duplicates = archive_names.unique_names(["日" * 100 + ".jpg", "日" * 100 + ".jpg"])
+    assert all(len(name.encode("utf-8")) <= archive_names.MAX_NAME for name in long_duplicates)
 
 
 def test_delete_media_validates_document_paths(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:

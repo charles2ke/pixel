@@ -531,11 +531,11 @@ def move_media(
 ) -> List[Dict[str, Any]]:
     """Move a selection of photos and videos, files included, to another album.
 
-    This takes three commits, ordered so that a failure at any step leaves at
-    most unreferenced copies behind: the files are copied to the target folder
-    (existing blobs are reused, so no bytes are uploaded again), then every
-    document, the album index and both covers change in a single commit, and
-    finally the originals are removed.
+    The files are copied to the target folder (existing blobs are reused, so no
+    bytes are uploaded again), then every document, the album index and both
+    covers change in a single commit, and finally the originals are removed.
+    Copies are retained if the metadata commit reports an error because it may
+    have succeeded remotely despite a transport failure.
     """
     wanted = clean_ids(ids)
     if not isinstance(target_id, str) or not target_id:
@@ -576,14 +576,7 @@ def move_media(
             batch.put(ALBUMS, source["_id"], {**source, "cover": _first_other(siblings, moved)})
         if not target.get("cover"):
             batch.put(ALBUMS, target["_id"], {**target, "cover": min(moved)})
-        try:
-            batch.commit()
-        except GitDbError:
-            try:
-                commit_files(db, {}, sorted(copies), message=f"pixel: undo copy of {label}")
-            except GitDbError as exc:
-                log.warning("could not remove the copies of %s after a failed move: %s", label, exc)
-            raise
+        batch.commit()
         try:
             commit_files(db, {}, sorted(moves), message=f"pixel: remove moved originals of {label}")
         except GitDbError as exc:

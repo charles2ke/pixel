@@ -387,6 +387,44 @@ def test_owner_pastes_and_retries_uploads(stack: Tuple[FakeGitHub, str], browser
     context.close()
 
 
+def test_upload_tasks_do_not_cross_authenticated_sessions(
+    stack: Tuple[FakeGitHub, str], browser: Browser
+) -> None:
+    _, base = stack
+    context, page = signed_in(browser, base)
+    album = make_album(page, "Session uploads")
+    open_album(page, album, 0)
+    page.evaluate(
+        "() => { window.__pixelThumbResolvers = []; "
+        "window.makeThumb = () => new Promise((resolve) => window.__pixelThumbResolvers.push(resolve)); }"
+    )
+    requests = 0
+
+    def unexpected_upload(route: Route) -> None:
+        nonlocal requests
+        requests += 1
+        route.fulfill(status=503, content_type="application/json", body='{"detail": "unexpected upload"}')
+
+    page.route("**/api/albums/*/media", unexpected_upload)
+    page.locator("#upload-input").set_input_files(
+        [{"name": f"pending-{i}.jpg", "mimeType": "image/jpeg", "buffer": photo(i)} for i in range(4)]
+    )
+    expect(page.locator("#upload-progress li")).to_have_count(4)
+    page.wait_for_function("window.__pixelThumbResolvers.length === 3")
+
+    page.locator("#signout-button").click()
+    expect(page.get_by_role("button", name="Sign in").first).to_be_visible()
+    sign_in(page, OWNER)
+    expect(page.locator("#user-chip")).to_contain_text("@charles2ke")
+    open_album(page, album, 0)
+    page.evaluate("() => window.__pixelThumbResolvers.forEach((resolve) => resolve(null))")
+    page.wait_for_timeout(100)
+
+    assert requests == 0
+    expect(page.locator("#upload-progress li")).to_have_count(0)
+    context.close()
+
+
 def test_viewer_can_select_and_download_but_not_change(
     stack: Tuple[FakeGitHub, str], browser: Browser
 ) -> None:

@@ -171,8 +171,15 @@ function rerender() {
 }
 
 // ------------------------------------------------------------------ session
+function sessionIdentity(session) {
+  return session && session.signed_in && session.user ? session.user.login : null;
+}
+
 async function loadSession(visit = false) {
-  state.session = await api(`/api/session${visit ? "?visit=1" : ""}`);
+  const previous = state.session;
+  const session = await api(`/api/session${visit ? "?visit=1" : ""}`);
+  if (previous && sessionIdentity(previous) !== sessionIdentity(session)) clearUploadState();
+  state.session = session;
   renderChrome();
 }
 
@@ -208,6 +215,7 @@ async function signIn(event) {
   button.disabled = true;
   try {
     await api("/api/login", { method: "POST", json: { token: $("#token-input").value } });
+    clearUploadState();
     $("#token-input").value = "";
     $("#signin-dialog").close();
     await loadSession();
@@ -224,6 +232,7 @@ async function signIn(event) {
 
 async function signOut() {
   await api("/api/logout", { method: "POST" }).catch(() => null);
+  clearUploadState();
   await loadSession();
   toast("Signed out");
   setHash("#/");
@@ -798,7 +807,7 @@ async function makeThumb(file) {
   return withTimeout(imageThumb(file), 8000);
 }
 
-function send(albumId, file, thumb, onProgress) {
+function send(albumId, file, thumb, onProgress, task) {
   return new Promise((resolve, reject) => {
     const form = new FormData();
     form.append("file", file, file.name);
@@ -818,6 +827,8 @@ function send(albumId, file, thumb, onProgress) {
       else reject(new ApiError(xhr.status, (payload && payload.detail) || `Upload failed (${xhr.status})`));
     });
     xhr.addEventListener("error", () => reject(new ApiError(0, "Network error")));
+    xhr.addEventListener("abort", () => reject(new Error("Upload canceled")));
+    task.abort = () => xhr.abort();
     xhr.send(form);
   });
 }
@@ -829,7 +840,26 @@ const uploadQueue = [];
 const uploadPanels = new Map();
 const uploadTasks = new WeakMap();
 const uploadedSince = new Map();
+const activeUploadTasks = new Set();
 let uploadsActive = 0;
+let uploadSessionVersion = 0;
+
+function isCurrentUploadTask(task) {
+  return !task.cancelled && task.sessionVersion === uploadSessionVersion;
+}
+
+function clearUploadState() {
+  uploadSessionVersion += 1;
+  uploadQueue.length = 0;
+  for (const task of activeUploadTasks) {
+    task.cancelled = true;
+    if (task.abort) task.abort();
+  }
+  activeUploadTasks.clear();
+  for (const panel of uploadPanels.values()) panel.section.remove();
+  uploadPanels.clear();
+  uploadedSince.clear();
+}
 
 function uploadPanel(albumId) {
   let panel = uploadPanels.get(albumId);
@@ -865,7 +895,7 @@ function uploadFiles(fileList) {
     const actions = el("span", { class: "row-actions" });
     const row = el("li", {}, el("span", { class: "name", title: file.name, text: file.name }), bar, status, actions);
     panel.list.append(row);
-    const task = { file, albumId, row, bar, status, actions, retryable: true };
+    const task = { file, albumId, row, bar, status, actions, retryable: true, sessionVersion: uploadSessionVersion };
     uploadTasks.set(row, task);
     const problem = uploadProblem(file);
     if (problem) failUpload(task, problem, false);
@@ -877,9 +907,12 @@ function uploadFiles(fileList) {
 function pumpUploads() {
   while (uploadsActive < UPLOAD_CONCURRENCY && uploadQueue.length) {
     const task = uploadQueue.shift();
+    if (!isCurrentUploadTask(task)) continue;
     uploadsActive += 1;
+    activeUploadTasks.add(task);
     runUpload(task).finally(() => {
       uploadsActive -= 1;
+      activeUploadTasks.delete(task);
       pumpUploads();
       if (!uploadsActive && !uploadQueue.length) uploadsIdle();
     });
@@ -891,17 +924,22 @@ async function runUpload(task) {
   try {
     status.textContent = "Preparing…";
     const thumb = await makeThumb(file);
+    if (!isCurrentUploadTask(task)) return;
     status.textContent = "Uploading…";
     await send(albumId, file, thumb, (fraction) => {
+      if (!isCurrentUploadTask(task)) return;
       bar.value = fraction;
       if (fraction >= 1) status.textContent = "Saving to GitHub…";
-    });
+    }, task);
+    if (!isCurrentUploadTask(task)) return;
     bar.value = 1;
     status.textContent = "Saved to GitHub ✓";
     row.classList.add("done");
     uploadedSince.set(albumId, (uploadedSince.get(albumId) || 0) + 1);
   } catch (error) {
-    failUpload(task, error.message, !FINAL_UPLOAD_ERRORS.includes(error.status));
+    if (isCurrentUploadTask(task)) failUpload(task, error.message, !FINAL_UPLOAD_ERRORS.includes(error.status));
+  } finally {
+    task.abort = null;
   }
 }
 
@@ -926,7 +964,7 @@ function failedUploads(albumId) {
 
 function retryUploads(tasks) {
   for (const task of tasks) {
-    if (!task.retryable || !task.row.classList.contains("failed")) continue;
+    if (!isCurrentUploadTask(task) || !task.retryable || !task.row.classList.contains("failed")) continue;
     task.row.classList.remove("failed");
     task.actions.replaceChildren();
     task.status.textContent = "Waiting…";

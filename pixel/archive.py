@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import re
+import unicodedata
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -28,36 +29,62 @@ _RESERVED = {"CON", "PRN", "AUX", "NUL"} | {f"{port}{n}" for port in ("COM", "LP
 def safe_name(name: str, fallback: str = "download") -> str:
     """Return ``name`` as a file name that Windows, macOS and Linux all accept."""
     cleaned = _UNSAFE.sub("_", name or "").strip(" .")
-    if len(cleaned) > MAX_NAME:
-        stem, dot, extension = cleaned.rpartition(".")
-        if dot and stem and len(extension) <= 10:
-            cleaned = stem[: MAX_NAME - len(extension) - 1].rstrip(" .") + "." + extension
-        else:
-            cleaned = cleaned[:MAX_NAME].rstrip(" .")
     if not cleaned or cleaned.startswith("."):
         cleaned = (fallback + cleaned) if cleaned else fallback
     if cleaned.split(".", 1)[0].upper() in _RESERVED:
         cleaned = "_" + cleaned
-    return cleaned
+    return _truncate_name(cleaned)
+
+
+def _truncate_utf8(value: str, byte_limit: int) -> str:
+    """Truncate a string to a UTF-8 byte limit without splitting a character."""
+    return value.encode("utf-8")[:byte_limit].decode("utf-8", "ignore")
+
+
+def _truncate_name(name: str) -> str:
+    if len(name.encode("utf-8")) <= MAX_NAME:
+        return name
+    stem, dot, extension = name.rpartition(".")
+    if dot and stem and len(extension.encode("utf-8")) <= 10:
+        stem = _truncate_utf8(stem, MAX_NAME - len(extension.encode("utf-8")) - 1).rstrip(" .")
+        return f"{stem}.{extension}"
+    return _truncate_utf8(name, MAX_NAME).rstrip(" .")
+
+
+def _collision_key(name: str) -> str:
+    return unicodedata.normalize("NFC", name).casefold()
+
+
+def _numbered_name(stem: str, extension: str, number: int) -> str:
+    marker = f" ({number})"
+    extension_suffix = f".{extension}" if extension else ""
+    available = MAX_NAME - len(marker.encode("utf-8")) - len(extension_suffix.encode("utf-8"))
+    if available < 1:
+        extension = _truncate_utf8(extension, MAX_NAME - len(marker.encode("utf-8")) - 2)
+        extension_suffix = f".{extension}" if extension else ""
+        available = MAX_NAME - len(marker.encode("utf-8")) - len(extension_suffix.encode("utf-8"))
+    stem = _truncate_utf8(stem, available).rstrip(" .") or "x"
+    return f"{stem}{marker}{extension_suffix}"
 
 
 def unique_names(names: Iterable[str]) -> List[str]:
     """Number repeated names (``photo (2).jpg``) so no member replaces another.
 
-    Names are compared case-insensitively, as Windows and macOS do.
+    Names are compared case-insensitively and after Unicode normalization, as
+    Windows and macOS filesystems do.
     """
     taken = set()
     unique: List[str] = []
     for name in names:
-        stem, dot, extension = name.rpartition(".")
+        candidate = _truncate_name(name)
+        stem, dot, extension = candidate.rpartition(".")
         if not dot or not stem:
-            stem, extension = name, ""
-        suffix = f".{extension}" if extension else ""
-        candidate, number = name, 2
-        while candidate.lower() in taken:
-            candidate = f"{stem} ({number}){suffix}"
+            stem, extension = candidate, ""
+        number = 2
+        while _collision_key(candidate) in taken:
+            candidate = _numbered_name(stem, extension, number)
             number += 1
-        taken.add(candidate.lower())
+        taken.add(_collision_key(candidate))
         unique.append(candidate)
     return unique
 
